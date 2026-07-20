@@ -26,6 +26,8 @@ import {
 import ProductCard from "../../components/ProductCard";
 import LoadMoreButton from "../../components/LoadMoreButton";
 import AddToCartButton from "../../components/AddToCartButton";
+import ProductBuyBox from "../../components/ProductBuyBox";
+import ProductVariantSpecs from "../../components/ProductVariantSpecs";
 import ProductGallery from "../../components/ProductGallery";
 import FavoriteButton from "../../components/FavoriteButton";
 import ProductFilterSidebar from "../../components/ProductFilterSidebar";
@@ -42,13 +44,27 @@ const allFallbackProducts = [
   ...fallbackPopularProducts,
   ...fallbackOfferProducts,
   ...fallbackDiscountProducts,
-].map((p) => ({ ...p, images: [] as string[], brand: null as string | null }));
+].map((p) => ({
+  ...p,
+  images: [] as string[],
+  brand: null as string | null,
+  variants: [] as { id: string; label: string; price: number; oldPrice: number | null; badge: string | null; isDefault: boolean }[],
+}));
 
 const getCategoryData = cache(async (slug: string) => {
   try {
     const category = await prisma.category.findUnique({ where: { slug } });
     if (!category) return null;
-    const products = await prisma.product.findMany({ where: { categoryId: category.id }, orderBy: { createdAt: "desc" } });
+    const products = await prisma.product.findMany({
+      where: { categoryId: category.id },
+      orderBy: { createdAt: "desc" },
+      include: {
+        variants: {
+          select: { id: true, label: true, price: true, oldPrice: true, badge: true, isDefault: true },
+          orderBy: { order: "asc" },
+        },
+      },
+    });
     return { category, products };
   } catch {
     const category = fallbackCategories.find((c) => c.slug === slug);
@@ -69,15 +85,21 @@ const getProductData = cache(async (slug: string) => {
       }),
       prisma.review.findMany({ where: { product: product.name, approved: true } }),
     ]);
-    // Fetched separately so a hiccup here (e.g. a not-yet-migrated client)
-    // can't take down the whole product page and fall back to demo data.
     let faqs: Awaited<ReturnType<typeof prisma.productFaq.findMany>> = [];
+    let variants: Awaited<ReturnType<typeof prisma.productVariant.findMany>> = [];
     try {
-      faqs = await prisma.productFaq.findMany({ where: { productId: product.id }, orderBy: { order: "asc" } });
+      [faqs, variants] = await Promise.all([
+        prisma.productFaq.findMany({ where: { productId: product.id }, orderBy: { order: "asc" } }),
+        prisma.productVariant.findMany({
+          where: { productId: product.id },
+          orderBy: { order: "asc" },
+        }),
+      ]);
     } catch {
       faqs = [];
+      variants = [];
     }
-    return { product, category: product.category, related, reviews, faqs };
+    return { product, category: product.category, related, reviews, faqs, variants };
   } catch {
     const product = allFallbackProducts.find((p) => p.slug === slug);
     if (!product) return null;
@@ -86,7 +108,7 @@ const getProductData = cache(async (slug: string) => {
       .filter((p) => p.categoryId === product.categoryId && p.id !== product.id)
       .slice(0, 4);
     const reviews = fallbackReviews.filter((r) => r.product === product.name);
-    return { product, category, related, reviews, faqs: [] };
+    return { product, category, related, reviews, faqs: [], variants: [] };
   }
 });
 
@@ -260,6 +282,7 @@ interface CategoryViewProps {
     badge: string | null;
     installmentsEnabled?: boolean;
     createdAt: Date;
+    variants: Array<{ id: string; label: string; price: number; oldPrice: number | null; badge: string | null; isDefault: boolean }>;
   }>;
   sort: ReturnType<typeof parseSort>;
   page: number;
@@ -373,6 +396,7 @@ function CategoryView({ category, products: baseProducts, sort, page, filters, r
                       name={localProductNames[product.slug] ?? product.name}
                       image={localProductImages[product.slug] ?? product.image}
                       badge={localProductBadges[product.slug] ?? product.badge}
+                      variants={product.variants}
                       showDiscount={filters.offersOnly}
                       installmentsEnabled={ratesEnabled && product.installmentsEnabled !== false}
                       installmentMonths={installmentMonths}
@@ -467,11 +491,23 @@ interface ProductViewProps {
     question: string;
     answer: string;
   }>;
+  variants: Array<{
+    id: string;
+    label: string;
+    btu: number | null;
+    surface: number | null;
+    price: number;
+    oldPrice: number | null;
+    badge: string | null;
+    isDefault: boolean;
+    availability: string;
+    specifications: { label: string; value: string }[];
+  }>;
   ratesEnabled: boolean;
   installmentMonths: number;
 }
 
-async function ProductView({ product, category, related, reviews, faqs, ratesEnabled, installmentMonths }: ProductViewProps) {
+async function ProductView({ product, category, related, reviews, faqs, variants, ratesEnabled, installmentMonths }: ProductViewProps) {
   const displayName = localProductNames[product.slug] ?? product.name;
   const displayImage = localProductImages[product.slug] ?? product.image;
   const discount = product.oldPrice ? Math.round((1 - product.price / product.oldPrice) * 100) : null;
@@ -506,6 +542,10 @@ async function ProductView({ product, category, related, reviews, faqs, ratesEna
     ...(product.specifications ?? []).slice(0, extraTopSpecsNeeded),
   ];
   const installmentsEnabled = ratesEnabled && product.installmentsEnabled !== false;
+
+  // Default variant's technical specs for the reactive specs section below the fold
+  const defaultVariant = variants.find((v) => v.isDefault) ?? variants[0] ?? null;
+  const defaultVariantSpecs = defaultVariant?.specifications ?? [];
   const galleryImages = product.images && product.images.length > 0
     ? product.images
     : displayImage
@@ -654,23 +694,8 @@ async function ProductView({ product, category, related, reviews, faqs, ratesEna
             <ProductGallery images={galleryImages} alt={displayName} badge={displayBadge} />
           </div>
 
-          {/* Right column: quick specs → price box → delivery info, stacked */}
+          {/* Right column: buy box (includes specs + variant selector) → delivery info */}
           <div className="flex flex-col gap-6">
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <p className="text-xs font-extrabold uppercase tracking-wide text-[#1d2353]">Caracteristici tehnice</p>
-                <span className={`text-xs font-bold flex items-center gap-1.5 ${inStock ? "text-green-600" : "text-gray-400"}`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${inStock ? "bg-green-500" : "bg-gray-400"}`} />
-                  {product.availability}
-                </span>
-              </div>
-              <div className="flex flex-col gap-2.5">
-                {topPanelSpecs.map((spec, i) => (
-                  <QuickSpecRow key={`${spec.label}-${i}`} label={spec.label} value={spec.value} />
-                ))}
-              </div>
-            </div>
-
             {product.description && (
               <p className="text-gray-600 text-[15px] leading-relaxed">
                 {product.description}
@@ -681,92 +706,19 @@ async function ProductView({ product, category, related, reviews, faqs, ratesEna
               <ProductOfferBanner discount={discount} countdownMinutes={countdownMinutes} />
             )}
 
-            <div className="border border-gray-100 rounded-2xl p-5">
-              <div className="mb-1">
-                {product.oldPrice && discount && (
-                  <div className="flex items-center gap-2 mb-2 flex-wrap">
-                    <span className="text-sm text-gray-400 line-through">
-                      {product.oldPrice.toLocaleString("ro-MD")} MDL
-                    </span>
-                    <span className="inline-flex items-center bg-[#c7092b] text-white text-xs font-extrabold px-2.5 py-1 rounded-md">
-                      -{discountAmount?.toLocaleString("ro-MD")} MDL
-                    </span>
-                    <span className="inline-flex items-center bg-[#fdf2f3] text-[#c7092b] text-xs font-extrabold px-2.5 py-1 rounded-md">
-                      -{discount}%
-                    </span>
-                  </div>
-                )}
-                <span className="text-2xl font-extrabold text-gray-900">
-                  {product.price.toLocaleString("ro-MD")} MDL
-                </span>
-              </div>
-
-              {installmentsEnabled && (
-                <div className="inline-flex items-center gap-2 bg-[#eef1fb] rounded-lg px-3 py-2 mb-4">
-                  <span className="bg-[#1d2353] text-white text-[10px] font-extrabold px-2 py-1 rounded uppercase tracking-wide">
-                    Rate
-                  </span>
-                  <span className="text-xs font-bold text-[#1d2353]">
-                    în {installmentMonths} luni, de la {Math.ceil(product.price / installmentMonths).toLocaleString("ro-MD")} lei/lună
-                  </span>
-                </div>
-              )}
-
-              <div className="flex items-stretch gap-3 mb-3">
-                <AddToCartButton
-                  slug={product.slug}
-                  name={displayName}
-                  price={product.price}
-                  oldPrice={product.oldPrice}
-                  image={displayImage}
-                  inStock={inStock}
-                  className={`${installmentsEnabled ? "flex-[3]" : "flex-1"} h-12 rounded-xl text-sm font-bold uppercase tracking-wide flex items-center justify-center gap-2 transition-colors ${
-                    inStock
-                      ? "bg-[#c7092b] hover:bg-[#a5071f] text-white"
-                      : "bg-gray-100 text-gray-400 cursor-not-allowed"
-                  }`}
-                >
-                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />
-                  </svg>
-                  {inStock ? "Adaugă în coș" : "Stoc epuizat"}
-                </AddToCartButton>
-
-                {installmentsEnabled && (
-                  <ProductOfferModal
-                    productId={product.id}
-                    productName={displayName}
-                    productImage={displayImage}
-                    title="Cumpără în rate"
-                    sourceLabel="Cerere achiziție în rate"
-                    className="flex-[2] h-12 flex items-center justify-center border-2 border-[#1d2353] text-[#1d2353] hover:bg-[#1d2353] hover:text-white font-bold rounded-xl transition-all duration-300 text-sm uppercase tracking-wide text-center hover:-translate-y-0.5 hover:shadow-md active:scale-95 active:translate-y-0"
-                  >
-                    Cumpără în rate
-                  </ProductOfferModal>
-                )}
-              </div>
-
-              <ProductOfferModal
-                productId={product.id}
-                productName={displayName}
-                productImage={displayImage}
-                className="group w-full flex items-center justify-center gap-1.5 text-gray-400 hover:text-[#c7092b] text-sm transition-colors active:scale-95"
-              >
-                <svg
-                  className="w-4 h-4 shrink-0 transition-transform duration-300 group-hover:rotate-12 group-hover:scale-110"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                  viewBox="0 0 24 24"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <span className="relative">
-                  Cere consultație
-                  <span className="absolute left-0 -bottom-0.5 w-0 h-px bg-[#c7092b] transition-all duration-300 group-hover:w-full" />
-                </span>
-              </ProductOfferModal>
-            </div>
+            <ProductBuyBox
+              variants={variants}
+              productId={product.id}
+              productName={displayName}
+              productSlug={product.slug}
+              displayImage={displayImage ?? null}
+              basePrice={product.price}
+              baseOldPrice={product.oldPrice ?? null}
+              baseAvailability={product.availability}
+              baseSpecs={topPanelSpecs}
+              installmentsEnabled={installmentsEnabled}
+              installmentMonths={installmentMonths}
+            />
 
             <div className="grid grid-cols-3 gap-3 text-center">
               <div className="flex flex-col items-center gap-1.5">
@@ -796,27 +748,15 @@ async function ProductView({ product, category, related, reviews, faqs, ratesEna
       </section>
 
       {/* Full specs */}
-      {(specs.length > 0 || (product.specifications && product.specifications.length > 0)) && (
+      {(specs.length > 0 || defaultVariantSpecs.length > 0) && (
         <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-12 pb-12">
           <h2 className="text-2xl font-extrabold text-[#1d2353] mb-6">Caracteristici</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-            <div className="border border-gray-100 rounded-2xl overflow-hidden">
-              <div className="bg-[#f6f8fb] px-5 py-3 text-sm font-extrabold text-[#1d2353]">Informații generale</div>
-              {specs.map((spec, i) => (
-                <div
-                  key={`${spec.label}-${i}`}
-                  className={`flex items-center justify-between px-5 py-3 border-t border-gray-100 ${i % 2 === 1 ? "bg-[#fafbfc]" : ""}`}
-                >
-                  <span className="text-sm text-gray-500">{spec.label}</span>
-                  <span className="text-sm font-bold text-[#1d2353] text-right">{spec.value}</span>
-                </div>
-              ))}
-            </div>
-
-            {product.specifications && product.specifications.length > 0 && (
+          <div className="flex flex-col gap-6">
+            {/* Informații generale — static */}
+            {specs.length > 0 && (
               <div className="border border-gray-100 rounded-2xl overflow-hidden">
-                <div className="bg-[#f6f8fb] px-5 py-3 text-sm font-extrabold text-[#1d2353]">Specificații tehnice</div>
-                {product.specifications.map((spec, i) => (
+                <div className="bg-[#f6f8fb] px-5 py-3 text-sm font-extrabold text-[#1d2353]">Informații generale</div>
+                {specs.map((spec, i) => (
                   <div
                     key={`${spec.label}-${i}`}
                     className={`flex items-center justify-between px-5 py-3 border-t border-gray-100 ${i % 2 === 1 ? "bg-[#fafbfc]" : ""}`}
@@ -826,6 +766,11 @@ async function ProductView({ product, category, related, reviews, faqs, ratesEna
                   </div>
                 ))}
               </div>
+            )}
+
+            {/* Caracteristici tehnice — reactive (updates when variant changes) */}
+            {defaultVariantSpecs.length > 0 && (
+              <ProductVariantSpecs initialSpecs={defaultVariantSpecs} />
             )}
           </div>
         </section>

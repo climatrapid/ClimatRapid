@@ -1,9 +1,20 @@
 "use client";
 
+import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { useTranslations } from "next-intl";
 import FavoriteButton from "./FavoriteButton";
 import AddToCartButton from "./AddToCartButton";
+
+interface VariantPill {
+  id: string;
+  label: string;
+  price: number;
+  oldPrice: number | null;
+  badge: string | null;
+  isDefault: boolean;
+}
 
 interface ProductCardProps {
   name: string;
@@ -20,6 +31,7 @@ interface ProductCardProps {
   showDiscount?: boolean;
   installmentsEnabled?: boolean;
   installmentMonths?: number;
+  variants?: VariantPill[];
 }
 
 function StarRating({ rating }: { rating: number }) {
@@ -56,15 +68,48 @@ export default function ProductCard({
   badge,
   installmentsEnabled,
   installmentMonths = 4,
+  variants,
 }: ProductCardProps) {
-  const discount = oldPrice ? Math.round((1 - price / oldPrice) * 100) : null;
-  const discountAmount = oldPrice ? Math.round(oldPrice - price) : null;
+  const t = useTranslations("product");
+
+  const hasVariants = variants && variants.length > 0;
+  const defaultVariantIdx = hasVariants
+    ? Math.max(0, variants!.findIndex((v) => v.isDefault))
+    : null;
+
+  const [selectedVariantIdx, setSelectedVariantIdx] = useState<number | null>(defaultVariantIdx);
+
+  // On cards: show only m²-based variants, deduplicated by surface number.
+  // This removes BTU-exterior variants and duplicate surfaces (e.g. same m² in different colors/types).
+  const cardVariants: { originalIdx: number; label: string; id: string }[] = (() => {
+    if (!hasVariants) return [];
+    const seenM2 = new Set<string>();
+    return variants!
+      .map((v, originalIdx) => ({ v, originalIdx }))
+      .filter(({ v }) => {
+        if (!v.label.includes("m²")) return false;
+        const m = v.label.match(/^(\d+)/);
+        const key = m ? m[1] : v.label;
+        if (seenM2.has(key)) return false;
+        seenM2.add(key);
+        return true;
+      })
+      .map(({ v, originalIdx }) => ({ originalIdx, label: v.label, id: v.id }));
+  })();
+
+  const selectedVariant = selectedVariantIdx !== null && hasVariants ? variants![selectedVariantIdx] : null;
+  const displayPrice = selectedVariant?.price ?? price;
+  const displayOldPrice = selectedVariant?.oldPrice ?? oldPrice;
+  const displayVariantLabel = selectedVariant?.label;
+
+  const discount = displayOldPrice ? Math.round((1 - displayPrice / displayOldPrice) * 100) : null;
+  const discountAmount = displayOldPrice ? Math.round(displayOldPrice - displayPrice) : null;
   const displayBadge = badge ?? (discount ? `-${discount}%` : null);
 
   const specs = [
     btu ? `${(btu / 1000).toFixed(0)}000 BTU` : null,
     technology || null,
-    energyClass ? `Clasa ${energyClass}` : null,
+    energyClass ? `${t("class")} ${energyClass}` : null,
   ]
     .filter(Boolean)
     .join(", ");
@@ -99,10 +144,9 @@ export default function ProductCard({
         {/* Favorite */}
         <div className="absolute top-2 right-2 sm:top-4 sm:right-4">
           <FavoriteButton
-            product={{ slug, name, price, oldPrice, image, btu, technology, energyClass, rating, reviewCount, badge }}
+            product={{ slug, name, price: displayPrice, oldPrice: displayOldPrice, image, btu, technology, energyClass, rating, reviewCount, badge }}
           />
         </div>
-
       </div>
 
       {/* Content */}
@@ -119,19 +163,38 @@ export default function ProductCard({
           <p className="text-xs text-gray-500 mb-3">{specs}</p>
         )}
 
+        {/* Variant pills — only m² variants, deduplicated */}
+        {cardVariants.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-3 overflow-hidden max-h-[56px]">
+            {cardVariants.map(({ originalIdx, label, id }) => (
+              <button
+                key={id}
+                onClick={(e) => { e.preventDefault(); setSelectedVariantIdx(originalIdx); }}
+                className={`text-[11px] font-bold px-2 py-1 rounded-full border transition-all ${
+                  selectedVariantIdx === originalIdx
+                    ? "bg-[#1d2353] text-white border-[#1d2353]"
+                    : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Rating */}
         <div className="flex items-center gap-2 mb-4">
           <StarRating rating={rating} />
           <span className="text-sm text-gray-500">({reviewCount})</span>
         </div>
 
-        {/* Price + actions — pinned to bottom */}
+        {/* Price + actions */}
         <div className="mt-auto">
           <div className="mb-2">
-            {oldPrice && discount && (
+            {displayOldPrice && discount && (
               <div className="flex items-center gap-1.5 mb-1 flex-wrap">
                 <span className="text-xs text-gray-400 line-through">
-                  {oldPrice.toLocaleString("ro-MD")} MDL
+                  {displayOldPrice.toLocaleString("ro-MD")} MDL
                 </span>
                 <span className="inline-flex items-center bg-[#c7092b] text-white text-[10px] font-extrabold px-2 py-0.5 rounded-full">
                   -{discountAmount?.toLocaleString("ro-MD")} MDL
@@ -142,17 +205,17 @@ export default function ProductCard({
               </div>
             )}
             <span className="text-base sm:text-lg lg:text-xl font-extrabold text-gray-900">
-              {price.toLocaleString("ro-MD")} MDL
+              {displayPrice.toLocaleString("ro-MD")} MDL
             </span>
           </div>
 
           {installmentsEnabled !== false && (
             <div className="inline-flex items-center gap-1.5 bg-[#eef1fb] rounded-full px-2.5 py-1 mb-3">
               <span className="bg-[#1d2353] text-white text-[9px] font-extrabold px-1.5 py-0.5 rounded-full uppercase tracking-wide">
-                Rate
+                {t("rate")}
               </span>
               <span className="text-[10px] font-bold text-[#1d2353]">
-                de la {Math.ceil(price / installmentMonths).toLocaleString("ro-MD")} lei/lună
+                {t("from")} {Math.ceil(displayPrice / installmentMonths).toLocaleString("ro-MD")} {t("perMonth")}
               </span>
             </div>
           )}
@@ -160,16 +223,17 @@ export default function ProductCard({
           <div className="flex items-center gap-1.5 sm:gap-2">
             <AddToCartButton
               slug={slug}
-              name={name}
-              price={price}
-              oldPrice={oldPrice ?? null}
+              name={displayVariantLabel ? `${name} — ${displayVariantLabel}` : name}
+              price={displayPrice}
+              oldPrice={displayOldPrice ?? null}
               image={image ?? null}
+              variantLabel={displayVariantLabel}
               className="flex-1 h-9 sm:h-11 bg-[#c7092b] hover:bg-[#a5071f] text-white text-xs font-bold rounded-full transition-all flex items-center justify-center gap-2 uppercase tracking-wide disabled:bg-gray-200 disabled:text-gray-400 active:scale-95 hover:shadow-md"
             >
               <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />
               </svg>
-              <span className="hidden sm:inline">Adaugă în coș</span>
+              <span className="hidden sm:inline">{t("addToCart")}</span>
             </AddToCartButton>
             <button
               onClick={() => { window.location.href = `/produse/${slug}`; }}
